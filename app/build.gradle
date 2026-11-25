@@ -44,13 +44,14 @@ android {
         externalNativeBuild {
             cmake { arguments '-DANDROID_STL=c++_static' }
         }
-        versionCode 10702
-        versionName '1.7.2'
+        versionCode 10703
+        versionName '1.7.3'
     }
 
     signingConfigs {
         stable {
             storeFile signingStoreFile
+            storeType 'PKCS12'
             storePassword signingProperties.getProperty('storePassword')
             keyAlias signingProperties.getProperty('keyAlias')
             keyPassword signingProperties.getProperty('keyPassword')
