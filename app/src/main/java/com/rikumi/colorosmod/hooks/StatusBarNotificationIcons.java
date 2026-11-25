@@ -123,7 +123,7 @@ public final class StatusBarNotificationIcons {
     private static boolean isStatusBarIcon(View view) {
         if (STATUS_BAR_ICONS.containsKey(view)) return true;
         Class<?> cls = containerClass;
-        if (cls == null) return false;
+        if (cls == null) return true; // 容器类没拿到时宁可变通，也不能整个功能不工作
         Object parent = view.getParent();
         if (!cls.isInstance(parent)) return false;
         STATUS_BAR_ICONS.put(view, Boolean.TRUE);
@@ -292,20 +292,13 @@ public final class StatusBarNotificationIcons {
      * 每帧兜底：只在 drawable 被系统换掉时才重新设置，命中时几乎没有开销。
      * 新通知的 setIcon/updateDrawable 一旦都被系统侧内联掉，这里是最后一道保险。
      */
+    /**
+     * 每帧兜底：只在 drawable 被系统换掉时才重新设置，命中时几乎没有开销。
+     * 新通知的 setIcon/updateDrawable 一旦都被系统侧内联掉，这里是最后一道保险。
+     */
     private static void ensure(View view) {
         if (!active || !themeEnabled()) return;
-        if (!(view instanceof ImageView icon)) return;
-        if (!isStatusBarIcon(view)) return;
-        String pkg = PACKAGES.get(view);
-        if (pkg == null || pkg.isEmpty()) return;
-        Drawable target = ThemeIconPack.drawable(pkg);
-        if (target == null || icon.getDrawable() == target) return;
-        try {
-            THEMED.put(view, Boolean.TRUE);
-            icon.clearColorFilter();
-            icon.setImageDrawable(target);
-            diag("rethemed " + pkg);
-        } catch (Throwable t) { log("theme notification icon ensure failed: " + t); }
+        apply(view);
     }
 
     private static void restore(View view) {
