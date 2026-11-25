@@ -6,6 +6,7 @@ import static com.rikumi.colorosmod.XposedInit.readInt;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.Handler;
@@ -45,35 +46,49 @@ import java.util.zip.ZipFile;
  * 内含 allApps.xml（图标文件名 -> 包名）与 res/drawable-xxhdpi/*.png。
  * SystemUI 与桌面同为 platform_app 域，SELinux 允许读取 oem_theme_data_file。
  * 命中时直接把彩色主题图标设为状态栏图标的 drawable，并跳过系统的单色着色。
+ *
+ * 触发点：IconManager#setIcon 是每次通知图标更新的必经之路，作为主入口；
+ * updateDrawable/set 补刀；onDraw 只做兜底(引用相同即跳过)，避免每帧重复设图。
  */
 public final class StatusBarNotificationIcons {
     public static final String KEY_SIZE_ENABLED = "statusbar_notification_icon_size_enabled";
     public static final String KEY_SIZE_PERCENT = "statusbar_notification_icon_size_percent";
-    public static final String KEY_THEME_STYLE = "statusbar_notification_icon_style";
-    public static final int STYLE_DEFAULT = 0;
-    public static final int STYLE_THEME = 1;
+    public static final String KEY_THEME_ENABLED = "statusbar_notification_icon_theme_enabled";
 
     private static final String ICON_VIEW = "com.android.systemui.statusbar.StatusBarIconView";
     private static final String ICON_CONTAINER =
             "com.android.systemui.statusbar.phone.NotificationIconContainer";
+    private static final String ICON_MANAGER =
+            "com.android.systemui.statusbar.notification.icon.IconManager";
+    private static final String STATUS_BAR_ICON = "com.android.internal.statusbar.StatusBarIcon";
     private static final String OPLUS_CONTROLLER =
             "com.oplus.systemui.statusbar.phone.StatusBarIconControllerExImpl";
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
-    /** 状态栏通知图标容器里的图标视图；只处理这些，锁屏/AOD/永不复位。 */
+    /** 状态栏通知图标容器里的图标视图；只处理这些，锁屏/AOD 视图不碰。 */
     private static final Map<View, Boolean> STATUS_BAR_ICONS =
             Collections.synchronizedMap(new WeakHashMap<>());
     /** 当前已被替换成主题图标的视图。 */
     private static final Map<View, Boolean> THEMED =
             Collections.synchronizedMap(new WeakHashMap<>());
+    /** 图标视图 -> 应用包名；由 setIcon/updateDrawable 写入，onDraw 只读。 */
+    private static final Map<View, String> PACKAGES =
+            Collections.synchronizedMap(new WeakHashMap<>());
     private static final ThreadLocal<Boolean> RESTORING = new ThreadLocal<>();
     private static volatile boolean active = true;
     /** StatusBarIconView 本身；ColorOS 实际使用的是其子类 StatIconView，必须按 isInstance 判断。 */
     private static volatile Class<?> iconViewClass;
+    /** NotificationIconContainer 本身；用于按父容器识别状态栏图标视图。 */
+    private static volatile Class<?> containerClass;
+    /** 主题图标开关的缓存值，null 表示还没读过；refresh() 时清空。 */
+    private static volatile Boolean themeCached;
+    private static int diagCount;
+    private static final int DIAG_LIMIT = 40;
 
     public static void hook(XC_LoadPackage.LoadPackageParam lp) {
         hookContainer(lp);
         hookIconScale(lp);
+        hookIconManager(lp);
         hookThemeDrawable(lp);
         hookThemeColor(lp);
         log("HOOK OK status bar notification icon size/theme");
@@ -95,12 +110,30 @@ public final class StatusBarNotificationIcons {
     }
 
     static boolean themeEnabled() {
-        return active && readInt(KEY_THEME_STYLE, STYLE_DEFAULT) == STYLE_THEME;
+        if (!active) return false;
+        Boolean cached = themeCached;
+        if (cached == null) {
+            cached = readBool(KEY_THEME_ENABLED, false);
+            themeCached = cached;
+        }
+        return cached;
+    }
+
+    /** 只处理真正挂在状态栏图标容器下的视图，避免把通知列表/锁屏的图标一起改掉。 */
+    private static boolean isStatusBarIcon(View view) {
+        if (STATUS_BAR_ICONS.containsKey(view)) return true;
+        Class<?> cls = containerClass;
+        if (cls == null) return false;
+        Object parent = view.getParent();
+        if (!cls.isInstance(parent)) return false;
+        STATUS_BAR_ICONS.put(view, Boolean.TRUE);
+        return true;
     }
 
     private static void hookContainer(XC_LoadPackage.LoadPackageParam lp) {
         try {
             Class<?> container = XposedHelpers.findClass(ICON_CONTAINER, lp.classLoader);
+            containerClass = container;
             XposedHelpers.findAndHookMethod(container, "onViewAdded", View.class, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam p) {
                     if (!(p.args[0] instanceof View view)) return;
@@ -112,6 +145,7 @@ public final class StatusBarNotificationIcons {
                 @Override protected void afterHookedMethod(MethodHookParam p) {
                     STATUS_BAR_ICONS.remove(p.args[0]);
                     THEMED.remove(p.args[0]);
+                    PACKAGES.remove(p.args[0]);
                 }
             });
         } catch (Throwable t) { log("HOOK FAIL notification icon container: " + t); }
@@ -136,6 +170,34 @@ public final class StatusBarNotificationIcons {
         } catch (Throwable t) { log("HOOK FAIL StatusBarIconView#maybeUpdateIconScaleDimens: " + t); }
     }
 
+    /**
+     * 主入口：IconManager 每次刷新通知图标都会走 setIcon，且直接带着图标视图。
+     * 这里先把包名记下来（比从视图字段反推可靠），再做主题图标替换。
+     */
+    private static void hookIconManager(XC_LoadPackage.LoadPackageParam lp) {
+        try {
+            Class<?> manager = XposedHelpers.findClass(ICON_MANAGER, lp.classLoader);
+            // 不写死签名：只要有一个参数是状态栏图标视图就认，避免 ColorOS 改了形参顺序后失效。
+            XposedBridge.hookAllMethods(manager, "setIcon", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    View view = null;
+                    for (Object arg : p.args) {
+                        if (arg instanceof View candidate && isIconView(candidate)) { view = candidate; break; }
+                    }
+                    if (view == null) return;
+                    String pkg = null;
+                    for (Object arg : p.args) {
+                        String resolved = packageOfEntry(arg);
+                        if (resolved != null) { pkg = resolved; break; }
+                    }
+                    if (pkg != null) PACKAGES.put(view, pkg);
+                    apply(view, pkg);
+                }
+            });
+            log("HOOK OK IconManager#setIcon");
+        } catch (Throwable t) { log("HOOK FAIL IconManager#setIcon: " + t); }
+    }
+
     private static void hookThemeDrawable(XC_LoadPackage.LoadPackageParam lp) {
         try {
             Class<?> icon = XposedHelpers.findClass(ICON_VIEW, lp.classLoader);
@@ -144,6 +206,19 @@ public final class StatusBarNotificationIcons {
                     if (p.thisObject instanceof View view) apply(view);
                 }
             });
+            Class<?> descriptor = XposedHelpers.findClass(STATUS_BAR_ICON, lp.classLoader);
+            XposedHelpers.findAndHookMethod(icon, "set", descriptor, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (p.thisObject instanceof View view) apply(view);
+                }
+            });
+            // 兜底：系统在别处覆盖 drawable 时，绘制前一帧纠正回来。
+            XposedHelpers.findAndHookMethod(icon, "onDraw", Canvas.class, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    if (p.thisObject instanceof View view) ensure(view);
+                }
+            });
+            log("HOOK OK StatusBarIconView#updateDrawable/set/onDraw");
         } catch (Throwable t) { log("HOOK FAIL StatusBarIconView#updateDrawable: " + t); }
     }
 
@@ -181,36 +256,75 @@ public final class StatusBarNotificationIcons {
     }
 
     private static void apply(View view) {
+        apply(view, null);
+    }
+
+    private static void apply(View view, String pkgHint) {
         if (!active) return;
         Class<?> cls = iconViewClass;
         if (cls != null && !cls.isInstance(view)) return;
         if (Boolean.TRUE.equals(RESTORING.get())) return;
-        if (!STATUS_BAR_ICONS.containsKey(view)) return;
+        if (!isStatusBarIcon(view)) return;
         try {
+            String pkg = pkgHint;
+            if (pkg == null || pkg.isEmpty()) pkg = PACKAGES.get(view);
+            if (pkg == null || pkg.isEmpty()) pkg = packageOf(view);
+            if (pkg != null && !pkg.isEmpty()) PACKAGES.put(view, pkg);
             if (!themeEnabled()) {
                 if (THEMED.remove(view) != null) restore(view);
                 return;
             }
-            Drawable drawable = ThemeIconPack.drawable(packageOf(view));
+            Drawable drawable = ThemeIconPack.drawable(pkg);
             ImageView icon = (ImageView) view;
             if (drawable == null) {
                 if (THEMED.remove(view) != null) restore(view);
                 return;
             }
             THEMED.put(view, Boolean.TRUE);
+            if (icon.getDrawable() == drawable) return;
             icon.clearColorFilter();
             icon.setImageDrawable(drawable);
+            diag("themed " + pkg);
         } catch (Throwable t) { log("theme notification icon apply failed: " + t); }
+    }
+
+    /**
+     * 每帧兜底：只在 drawable 被系统换掉时才重新设置，命中时几乎没有开销。
+     * 新通知的 setIcon/updateDrawable 一旦都被系统侧内联掉，这里是最后一道保险。
+     */
+    private static void ensure(View view) {
+        if (!active || !themeEnabled()) return;
+        if (!(view instanceof ImageView icon)) return;
+        if (!isStatusBarIcon(view)) return;
+        String pkg = PACKAGES.get(view);
+        if (pkg == null || pkg.isEmpty()) return;
+        Drawable target = ThemeIconPack.drawable(pkg);
+        if (target == null || icon.getDrawable() == target) return;
+        try {
+            THEMED.put(view, Boolean.TRUE);
+            icon.clearColorFilter();
+            icon.setImageDrawable(target);
+            diag("rethemed " + pkg);
+        } catch (Throwable t) { log("theme notification icon ensure failed: " + t); }
     }
 
     private static void restore(View view) {
         if (Boolean.TRUE.equals(RESTORING.get())) return;
         RESTORING.set(Boolean.TRUE);
         try {
-            XposedHelpers.callMethod(view, "updateDrawable", true);
+            XposedHelpers.callMethod(view, "updateDrawable");
         } catch (Throwable ignored) {
-            try { XposedHelpers.callMethod(view, "updateDrawable"); } catch (Throwable ignored2) { }
+            try { XposedHelpers.callMethod(view, "updateDrawable", true); } catch (Throwable ignored2) { }
         } finally { RESTORING.remove(); }
+    }
+
+    private static String packageOfEntry(Object entry) {
+        if (entry == null) return null;
+        try {
+            Object sbn = XposedHelpers.callMethod(entry, "getSbn");
+            if (sbn instanceof StatusBarNotification notification) return notification.getPackageName();
+        } catch (Throwable ignored) { }
+        return null;
     }
 
     private static String packageOf(View view) {
@@ -221,14 +335,17 @@ public final class StatusBarNotificationIcons {
         try {
             Object slot = XposedHelpers.callMethod(view, "getSlot");
             if (slot instanceof String text) {
-                String[] parts = text.split("\\|");
-                if (parts.length >= 2 && !parts[1].isEmpty()) return parts[1];
+                for (String part : text.split("\\|")) {
+                    if (part.isEmpty()) continue;
+                    if (part.indexOf('.') > 0 && !Character.isDigit(part.charAt(0))) return part;
+                }
             }
         } catch (Throwable ignored) { }
         return null;
     }
 
     public static void refresh() {
+        themeCached = null;
         MAIN.post(() -> {
             if (!active) return;
             // 宽度由 MonochromeIconGeometryHooks 的容器测量入口统一按比例重算。
@@ -260,6 +377,12 @@ public final class StatusBarNotificationIcons {
         MonochromeIconGeometryHooks.refresh();
     }
 
+    private static void diag(String msg) {
+        if (diagCount >= DIAG_LIMIT) return;
+        diagCount++;
+        log("[theme icon " + diagCount + "] " + msg);
+    }
+
     /**
      * 主题商店图标包读取器。
      * /data/theme/icons 为 zip：allApps.xml 给出 图标文件名 -> 包名，图标本体在 res/drawable-* 下。
@@ -270,7 +393,7 @@ public final class StatusBarNotificationIcons {
         private static final Pattern ICON = Pattern.compile("<icon\\b([^>]*)>");
         private static final Pattern NAME = Pattern.compile("\\bname\\s*=\\s*\"([^\"]+)\"");
         private static final Pattern PACKAGE = Pattern.compile("\\bpackage\\s*=\\s*\"([^\"]+)\"");
-        private static final int MAX_DRAWABLES = 24;
+        private static final int MAX_DRAWABLES = 32;
         private static final Map<String, Drawable> CACHE = new LinkedHashMap<>(16, .75f, true) {
             @Override protected boolean removeEldestEntry(Map.Entry<String, Drawable> eldest) {
                 return size() > MAX_DRAWABLES;
