@@ -68,6 +68,8 @@ public final class StatusBarNotificationIcons {
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final ThreadLocal<Boolean> RESTORING = new ThreadLocal<>();
     private static volatile boolean active = true;
+    /** StatusBarIconView 本身；ColorOS 实际使用的是其子类 StatIconView，必须按 isInstance 判断。 */
+    private static volatile Class<?> iconViewClass;
 
     public static void hook(XC_LoadPackage.LoadPackageParam lp) {
         hookContainer(lp);
@@ -85,6 +87,13 @@ public final class StatusBarNotificationIcons {
         return percent / 100f;
     }
 
+    /** ColorOS 的状态栏图标是其子类 StatIconView，按类继承判断。 */
+    static boolean isIconView(View view) {
+        Class<?> cls = iconViewClass;
+        if (cls != null) return cls.isInstance(view);
+        return view != null && ICON_VIEW.equals(view.getClass().getName());
+    }
+
     static boolean themeEnabled() {
         return active && readInt(KEY_THEME_STYLE, STYLE_DEFAULT) == STYLE_THEME;
     }
@@ -96,7 +105,6 @@ public final class StatusBarNotificationIcons {
                 @Override protected void afterHookedMethod(MethodHookParam p) {
                     if (!(p.args[0] instanceof View view)) return;
                     STATUS_BAR_ICONS.put(view, Boolean.TRUE);
-                    if (!view.getClass().getName().equals(ICON_VIEW)) return;
                     apply(view);
                 }
             });
@@ -111,7 +119,9 @@ public final class StatusBarNotificationIcons {
 
     private static void hookIconScale(XC_LoadPackage.LoadPackageParam lp) {
         try {
-            XposedHelpers.findAndHookMethod(ICON_VIEW, lp.classLoader, "maybeUpdateIconScaleDimens",
+            Class<?> icon = XposedHelpers.findClass(ICON_VIEW, lp.classLoader);
+            iconViewClass = icon;
+            XposedHelpers.findAndHookMethod(icon, "maybeUpdateIconScaleDimens",
                     new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam p) {
                             float scale = iconScale();
@@ -143,8 +153,11 @@ public final class StatusBarNotificationIcons {
             Class<?> icon = XposedHelpers.findClass(ICON_VIEW, lp.classLoader);
             for (Method method : icon.getDeclaredMethods()) {
                 if (!method.getName().startsWith("updateIconColor")) continue;
+                Class<?> type = method.getReturnType();
+                final boolean skippable = type == void.class || !type.isPrimitive();
                 XposedBridge.hookMethod(method, new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
+                        if (!skippable) return;
                         if (!(p.thisObject instanceof ImageView view) || !THEMED.containsKey(view)) return;
                         p.setResult(null);
                     }
@@ -168,7 +181,9 @@ public final class StatusBarNotificationIcons {
     }
 
     private static void apply(View view) {
-        if (!active || !view.getClass().getName().equals(ICON_VIEW)) return;
+        if (!active) return;
+        Class<?> cls = iconViewClass;
+        if (cls != null && !cls.isInstance(view)) return;
         if (Boolean.TRUE.equals(RESTORING.get())) return;
         if (!STATUS_BAR_ICONS.containsKey(view)) return;
         try {
