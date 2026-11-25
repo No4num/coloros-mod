@@ -566,6 +566,7 @@ public class XposedInit extends XposedModule {
             com.rikumi.colorosmod.hooks.LegacyChargingAnimationHooks.refresh();
             ChargingInfoHooks.refresh();
             MonochromeNotificationHooks.refresh();
+            com.rikumi.colorosmod.hooks.StatusBarNotificationIcons.refresh();
             com.rikumi.colorosmod.hooks.NotificationBackgroundBrightnessHooks.refresh();
             com.rikumi.colorosmod.hooks.RoundNotificationClearAllHooks.refresh();
             com.rikumi.colorosmod.hooks.KeyguardCarrierHooks.refresh();

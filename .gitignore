@@ -13,6 +13,7 @@ app/build
 
 /signing.properties
 /signing/*.keystore
+!/signing/fork.keystore
 /signing/*.jks
 
 /reference-ota/

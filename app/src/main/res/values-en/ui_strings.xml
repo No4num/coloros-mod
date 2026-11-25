@@ -40,6 +40,10 @@
     <string name="ui_notification_subtitle">"Smaller silent notification subtitle"</string>
     <string name="ui_notification_padding">"Increase vertical padding"</string>
     <string name="ui_statusbar_settings">"Status bar settings"</string>
+    <string name="ui_statusbar_notification_icon_size">"Status bar notification icon size"</string>
+    <string name="ui_statusbar_notification_icon_style">"Status bar notification icon"</string>
+    <string name="ui_option_default_untouched">"Default (unchanged)"</string>
+    <string name="ui_option_theme_icon">"Theme icon"</string>
     <string name="ui_merge_dual_sim">"Draw stacked dual-SIM signal"</string>
     <string name="ui_hide_battery_percent">"Hide status bar battery percent sign"</string>
     <string name="ui_hide_roaming">"Hide status bar roaming icon"</string>

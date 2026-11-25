@@ -38,6 +38,8 @@ public final class SystemUiHooks {
 
         NotificationHooks.hookNotificationIconAreaRepository(lpparam);
         MonochromeNotificationHooks.hook(lpparam);
+        // 状态栏通知图标: 尺寸缩放 + 主题图标, 始终注入, 运行时按各自开关门控。
+        StatusBarNotificationIcons.hook(lpparam);
         NotificationBackgroundBrightnessHooks.hook(lpparam);
         RoundNotificationClearAllHooks.hook(lpparam);
 
