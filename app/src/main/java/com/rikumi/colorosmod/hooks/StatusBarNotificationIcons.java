@@ -105,6 +105,8 @@ public final class StatusBarNotificationIcons {
     private static final java.util.concurrent.atomic.AtomicInteger ROW_DIAG =
             new java.util.concurrent.atomic.AtomicInteger();
     private static final int ROW_DIAG_LIMIT = 20;
+    private static final java.util.concurrent.atomic.AtomicInteger THEMED_DIAG =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     public static void hook(XC_LoadPackage.LoadPackageParam lp) {
         hookContainer(lp);
@@ -218,6 +220,14 @@ public final class StatusBarNotificationIcons {
         if (!cls.isInstance(parent)) return false;
         STATUS_BAR_ICONS.put(view, Boolean.TRUE);
         return true;
+    }
+
+    /**
+     * 状态栏顶部的图标看"状态栏通知图标"开关；通知中心列表里的图标看"通知列表"开关。
+     * 两个开关互相独立，所以这里按视图所在容器分别取。
+     */
+    private static boolean shouldTheme(View view) {
+        return isStatusBarIcon(view) ? themeEnabled() : listThemeEnabled();
     }
 
     private static void hookContainer(XC_LoadPackage.LoadPackageParam lp) {
@@ -438,16 +448,15 @@ public final class StatusBarNotificationIcons {
         Class<?> cls = iconViewClass;
         if (cls != null && !cls.isInstance(view)) return;
         if (Boolean.TRUE.equals(RESTORING.get())) return;
-        if (!isStatusBarIcon(view)) return;
+        if (!shouldTheme(view)) {
+            if (THEMED.remove(view) != null) restore(view);
+            return;
+        }
         try {
             String pkg = pkgHint;
             if (pkg == null || pkg.isEmpty()) pkg = PACKAGES.get(view);
             if (pkg == null || pkg.isEmpty()) pkg = packageOf(view);
             if (pkg != null && !pkg.isEmpty()) PACKAGES.put(view, pkg);
-            if (!themeEnabled()) {
-                if (THEMED.remove(view) != null) restore(view);
-                return;
-            }
             Drawable drawable = ThemeIconPack.drawable(pkg);
             ImageView icon = (ImageView) view;
             if (drawable == null) {
@@ -458,7 +467,11 @@ public final class StatusBarNotificationIcons {
             if (icon.getDrawable() == drawable) return;
             icon.clearColorFilter();
             icon.setImageDrawable(drawable);
-            diag("themed " + pkg);
+            if (THEMED_DIAG.getAndIncrement() < 15) {
+                Object parent = view.getParent();
+                diag("themed " + pkg + " parent="
+                        + (parent == null ? "null" : parent.getClass().getSimpleName()));
+            }
         } catch (Throwable t) { log("theme notification icon apply failed: " + t); }
     }
 
@@ -471,7 +484,8 @@ public final class StatusBarNotificationIcons {
      * 新通知的 setIcon/updateDrawable 一旦都被系统侧内联掉，这里是最后一道保险。
      */
     private static void ensure(View view) {
-        if (!active || !themeEnabled()) return;
+        if (!active) return;
+        if (!shouldTheme(view)) return;
         apply(view);
     }
 
