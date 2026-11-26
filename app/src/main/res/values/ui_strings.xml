@@ -50,6 +50,8 @@
     <string name="ui_statusbar_notification_icon_size">"状态栏通知图标大小"</string>
     <string name="ui_statusbar_notification_icon_theme">"状态栏通知图标使用主题图标"</string>
     <string name="ui_statusbar_notification_icon_theme_desc">"把状态栏通知小图标换成当前主题里的应用图标；主题没覆盖的应用仍用系统图标。"</string>
+    <string name="ui_notification_list_theme_icons">"通知列表使用主题图标"</string>
+    <string name="ui_notification_list_theme_icons_desc">"通知中心下拉后每条通知的图标也换成主题图标；主题没覆盖的应用仍用应用图标。"</string>
     <string name="ui_merge_dual_sim">"自绘制堆叠双卡信号"</string>
     <string name="ui_hide_battery_percent">"隐藏状态栏电量百分号"</string>
     <string name="ui_hide_roaming">"隐藏状态栏漫游图标"</string>

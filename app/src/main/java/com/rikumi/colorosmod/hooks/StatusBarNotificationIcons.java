@@ -54,6 +54,8 @@ public final class StatusBarNotificationIcons {
     public static final String KEY_SIZE_ENABLED = "statusbar_notification_icon_size_enabled";
     public static final String KEY_SIZE_PERCENT = "statusbar_notification_icon_size_percent";
     public static final String KEY_THEME_ENABLED = "statusbar_notification_icon_theme_enabled";
+    /** 通知中心列表里的通知图标也用主题图标。 */
+    public static final String KEY_LIST_THEME_ENABLED = "notification_list_theme_icons_enabled";
 
     private static final String ICON_VIEW = "com.android.systemui.statusbar.StatusBarIconView";
     private static final String ICON_CONTAINER =
@@ -63,10 +65,20 @@ public final class StatusBarNotificationIcons {
     private static final String STATUS_BAR_ICON = "com.android.internal.statusbar.StatusBarIcon";
     private static final String OPLUS_CONTROLLER =
             "com.oplus.systemui.statusbar.phone.StatusBarIconControllerExImpl";
+    /** 通知中心列表行图标的视图类（framework 内部类）。 */
+    private static final String ROW_ICON_VIEW = "com.android.internal.widget.NotificationRowIconView";
+    /** 通知行图标的数据源提供者（SystemUI 内部类），提供 shouldShowAppIcon/getAppIcon。 */
+    private static final String[] ROW_ICON_PROVIDERS = {
+            "com.android.systemui.statusbar.notification.row.icon.NotificationRowIconViewInflaterFactory$createIconProvider$1",
+            "com.android.systemui.statusbar.notification.row.icon.NotificationRowIconViewInflaterFactory$createIconProvider$2",
+    };
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     /** 状态栏通知图标容器里的图标视图；只处理这些，锁屏/AOD 视图不碰。 */
     private static final Map<View, Boolean> STATUS_BAR_ICONS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    /** 通知中心列表里出现过的行图标视图，切换开关时用来重新加载。 */
+    private static final Map<View, Boolean> ROW_ICONS =
             Collections.synchronizedMap(new WeakHashMap<>());
     /** 当前已被替换成主题图标的视图。 */
     private static final Map<View, Boolean> THEMED =
@@ -82,6 +94,8 @@ public final class StatusBarNotificationIcons {
     private static volatile Class<?> containerClass;
     /** 主题图标开关的缓存值，null 表示还没读过；refresh() 时清空。 */
     private static volatile Boolean themeCached;
+    /** 通知中心列表主题图标开关的缓存值。 */
+    private static volatile Boolean listThemeCached;
     private static int diagCount;
     private static final int DIAG_LIMIT = 40;
 
@@ -91,6 +105,7 @@ public final class StatusBarNotificationIcons {
         hookIconManager(lp);
         hookThemeDrawable(lp);
         hookThemeColor(lp);
+        hookRowIconProviders(lp);
         log("HOOK OK status bar notification icon size/theme");
     }
 
@@ -100,6 +115,27 @@ public final class StatusBarNotificationIcons {
         if (percent < 40) percent = 40;
         if (percent > 200) percent = 200;
         return percent / 100f;
+    }
+
+    /**
+     * 只有状态栏窗口（TYPE_STATUS_BAR）里的图标才处理。
+     * 下拉控制中心顶部那排图标属于 NotificationShade 窗口，不能跟着放大或换图标。
+     * 判定不出来时按状态栏处理，避免整个功能失效。
+     */
+    static boolean inStatusBarWindow(View view) {
+        if (view == null) return true;
+        try {
+            View root = view.getRootView();
+            android.view.ViewGroup.LayoutParams params = root.getLayoutParams();
+            if (params instanceof android.view.WindowManager.LayoutParams wlp) {
+                return wlp.type == android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR;
+            }
+        } catch (Throwable ignored) { }
+        return true;
+    }
+
+    static float iconScaleFor(View view) {
+        return inStatusBarWindow(view) ? iconScale() : 1f;
     }
 
     /** ColorOS 的状态栏图标是其子类 StatIconView，按类继承判断。 */
@@ -115,6 +151,16 @@ public final class StatusBarNotificationIcons {
         if (cached == null) {
             cached = readBool(KEY_THEME_ENABLED, false);
             themeCached = cached;
+        }
+        return cached;
+    }
+
+    static boolean listThemeEnabled() {
+        if (!active) return false;
+        Boolean cached = listThemeCached;
+        if (cached == null) {
+            cached = readBool(KEY_LIST_THEME_ENABLED, false);
+            listThemeCached = cached;
         }
         return cached;
     }
@@ -158,8 +204,9 @@ public final class StatusBarNotificationIcons {
             XposedHelpers.findAndHookMethod(icon, "maybeUpdateIconScaleDimens",
                     new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam p) {
-                            float scale = iconScale();
-                            if (!(p.thisObject instanceof View view) || scale == 1f) return;
+                            if (!(p.thisObject instanceof View view)) return;
+                            float scale = iconScaleFor(view);
+                            if (scale == 1f) return;
                             try {
                                 float current = XposedHelpers.getFloatField(view, "mIconScale");
                                 XposedHelpers.setFloatField(view, "mIconScale", current * scale);
@@ -255,6 +302,55 @@ public final class StatusBarNotificationIcons {
         } catch (Throwable t) { log("HOOK FAIL updateStatusBarIconGrayScale: " + t); }
     }
 
+    /**
+     * 通知中心列表里的通知图标：系统通过 NotificationRowIconView 的 IconProvider
+     * 决定画应用图标还是小图标。这里在开关打开且主题包里有该应用图标时，
+     * 强制走"应用图标"分支，并直接把它换成主题包里的彩色图标。
+     */
+    private static void hookRowIconProviders(XC_LoadPackage.LoadPackageParam lp) {
+        for (String name : ROW_ICON_PROVIDERS) {
+            String tag = name.substring(name.lastIndexOf('$'));
+            try {
+                Class<?> provider = XposedHelpers.findClass(name, lp.classLoader);
+                XposedBridge.hookAllMethods(provider, "shouldShowAppIcon", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) {
+                        if (!listThemeEnabled()) return;
+                        if (themeDrawableOf(p.thisObject) == null) return;
+                        p.setResult(Boolean.TRUE);
+                    }
+                });
+                XposedBridge.hookAllMethods(provider, "getAppIcon", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) {
+                        if (!listThemeEnabled()) return;
+                        Drawable themed = themeDrawableOf(p.thisObject);
+                        if (themed != null) p.setResult(themed);
+                    }
+                });
+                log("HOOK OK row icon provider " + tag);
+            } catch (Throwable t) { log("HOOK FAIL row icon provider " + tag + ": " + t); }
+        }
+        try {
+            Class<?> rowView = XposedHelpers.findClass(ROW_ICON_VIEW, lp.classLoader);
+            XposedBridge.hookAllMethods(rowView, "loadAppIcon", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    if (p.thisObject instanceof View view) ROW_ICONS.put(view, Boolean.TRUE);
+                }
+            });
+            log("HOOK OK NotificationRowIconView#loadAppIcon");
+        } catch (Throwable t) { log("HOOK FAIL NotificationRowIconView#loadAppIcon: " + t); }
+    }
+
+    private static Drawable themeDrawableOf(Object provider) {
+        if (provider == null) return null;
+        try {
+            Object sbn = XposedHelpers.getObjectField(provider, "$sbn");
+            if (sbn instanceof StatusBarNotification notification) {
+                return ThemeIconPack.drawable(notification.getPackageName());
+            }
+        } catch (Throwable ignored) { }
+        return null;
+    }
+
     private static void apply(View view) {
         apply(view, null);
     }
@@ -339,6 +435,7 @@ public final class StatusBarNotificationIcons {
 
     public static void refresh() {
         themeCached = null;
+        listThemeCached = null;
         MAIN.post(() -> {
             if (!active) return;
             // 宽度由 MonochromeIconGeometryHooks 的容器测量入口统一按比例重算。
@@ -353,6 +450,13 @@ public final class StatusBarNotificationIcons {
                     if (themeEnabled()) apply(view); else if (THEMED.remove(view) != null) restore(view);
                     view.invalidate();
                 } catch (Throwable t) { log("refresh status bar notification icon failed: " + t); }
+            }
+            java.util.ArrayList<View> rows;
+            synchronized (ROW_ICONS) { rows = new java.util.ArrayList<>(ROW_ICONS.keySet()); }
+            for (View row : rows) {
+                if (row == null) continue;
+                try { XposedHelpers.callMethod(row, "loadAppIcon"); }
+                catch (Throwable t) { log("refresh row icon failed: " + t); }
             }
         });
     }

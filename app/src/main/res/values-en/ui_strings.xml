@@ -43,6 +43,8 @@
     <string name="ui_statusbar_notification_icon_size">"Status bar notification icon size"</string>
     <string name="ui_statusbar_notification_icon_theme">"Use theme icons in status bar"</string>
     <string name="ui_statusbar_notification_icon_theme_desc">"Show your theme\'s app icons for status bar notification icons. Apps the theme does not cover keep the system icon."</string>
+    <string name="ui_notification_list_theme_icons">"Use theme icons in notification list"</string>
+    <string name="ui_notification_list_theme_icons_desc">"Show theme icons for each notification in the notification center. Apps the theme does not cover keep the app icon."</string>
     <string name="ui_merge_dual_sim">"Draw stacked dual-SIM signal"</string>
     <string name="ui_hide_battery_percent">"Hide status bar battery percent sign"</string>
     <string name="ui_hide_roaming">"Hide status bar roaming icon"</string>

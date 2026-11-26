@@ -45,7 +45,7 @@ final class MonochromeIconGeometryHooks {
                                 boolean enlarged = MonochromeNotificationHooks.enlargedIcon(icon);
                                 widths.put(icon, Boolean.TRUE);
                                 int target = enlarged ? cellWidth(icon) : baseline;
-                                float scale = StatusBarNotificationIcons.iconScale();
+                                float scale = StatusBarNotificationIcons.iconScaleFor(icon);
                                 if (scale != 1f) target = Math.max(1, Math.round(target * scale));
                                 setWidth(icon, target);
                                 XposedHelpers.callMethod(icon, "maybeUpdateIconScaleDimens");
@@ -81,7 +81,7 @@ final class MonochromeIconGeometryHooks {
         if (dw <= 0 || dh <= 0 || icon.getWidth() <= horizontal || vertical <= 0) return 0f;
         float actualFit = Math.min(1f, Math.min((icon.getWidth() - horizontal) / (float) dw, vertical / (float) dh));
         float nativeScale = XposedHelpers.getFloatField(icon, "mIconScale");
-        float drawing = drawingSize(icon) * StatusBarNotificationIcons.iconScale();
+        float drawing = drawingSize(icon) * StatusBarNotificationIcons.iconScaleFor(icon);
         float rendered = Math.max(dw, dh) * actualFit * nativeScale;
         return drawing > 0 && rendered > 0f ? drawing / rendered : 0f;
     }
