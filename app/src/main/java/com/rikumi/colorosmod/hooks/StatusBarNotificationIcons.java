@@ -106,7 +106,11 @@ public final class StatusBarNotificationIcons {
         hookThemeDrawable(lp);
         hookThemeColor(lp);
         hookRowIconProviders(lp);
-        log("HOOK OK status bar notification icon size/theme");
+        diag("HOOK OK status bar notification icon size/theme");
+        diag("hook ready size=" + readBool(KEY_SIZE_ENABLED, false)
+                + " percent=" + readInt(KEY_SIZE_PERCENT, 100)
+                + " theme=" + readBool(KEY_THEME_ENABLED, false)
+                + " listTheme=" + readBool(KEY_LIST_THEME_ENABLED, false));
     }
 
     static float iconScale() {
@@ -120,18 +124,19 @@ public final class StatusBarNotificationIcons {
     /**
      * 只有状态栏窗口（TYPE_STATUS_BAR）里的图标才处理。
      * 下拉控制中心顶部那排图标属于 NotificationShade 窗口，不能跟着放大或换图标。
-     * 判定不出来时按状态栏处理，避免整个功能失效。
+     * 判定不出来时按"不是状态栏"处理，宁可不动，也不要误伤控制中心。
      */
     static boolean inStatusBarWindow(View view) {
-        if (view == null) return true;
+        if (view == null) return false;
         try {
             View root = view.getRootView();
+            if (root == view) return false;
             android.view.ViewGroup.LayoutParams params = root.getLayoutParams();
             if (params instanceof android.view.WindowManager.LayoutParams wlp) {
                 return wlp.type == android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR;
             }
         } catch (Throwable ignored) { }
-        return true;
+        return false;
     }
 
     static float iconScaleFor(View view) {
@@ -205,7 +210,9 @@ public final class StatusBarNotificationIcons {
                     new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam p) {
                             if (!(p.thisObject instanceof View view)) return;
-                            float scale = iconScaleFor(view);
+                            boolean statusBar = inStatusBarWindow(view);
+                            float scale = statusBar ? iconScale() : 1f;
+                            diag("scale sb=" + statusBar + " x" + scale + " " + view.getClass().getSimpleName());
                             if (scale == 1f) return;
                             try {
                                 float current = XposedHelpers.getFloatField(view, "mIconScale");
@@ -214,7 +221,7 @@ public final class StatusBarNotificationIcons {
                             } catch (Throwable ignored) { }
                         }
                     });
-        } catch (Throwable t) { log("HOOK FAIL StatusBarIconView#maybeUpdateIconScaleDimens: " + t); }
+        } catch (Throwable t) { diag("HOOK FAIL maybeUpdateIconScaleDimens: " + t); }
     }
 
     /**
@@ -265,8 +272,8 @@ public final class StatusBarNotificationIcons {
                     if (p.thisObject instanceof View view) ensure(view);
                 }
             });
-            log("HOOK OK StatusBarIconView#updateDrawable/set/onDraw");
-        } catch (Throwable t) { log("HOOK FAIL StatusBarIconView#updateDrawable: " + t); }
+            diag("HOOK OK StatusBarIconView#updateDrawable/set/onDraw");
+        } catch (Throwable t) { diag("HOOK FAIL StatusBarIconView#updateDrawable: " + t); }
     }
 
     /** 系统会把通知小图标染成单色/灰度；主题图标要保持彩色。 */
@@ -298,8 +305,8 @@ public final class StatusBarNotificationIcons {
                     }
                 }
             });
-            log("HOOK OK StatusBarIconControllerExImpl#updateStatusBarIconGrayScale");
-        } catch (Throwable t) { log("HOOK FAIL updateStatusBarIconGrayScale: " + t); }
+            diag("HOOK OK updateStatusBarIconGrayScale");
+        } catch (Throwable t) { diag("HOOK FAIL updateStatusBarIconGrayScale: " + t); }
     }
 
     /**
@@ -326,8 +333,8 @@ public final class StatusBarNotificationIcons {
                         if (themed != null) p.setResult(themed);
                     }
                 });
-                log("HOOK OK row icon provider " + tag);
-            } catch (Throwable t) { log("HOOK FAIL row icon provider " + tag + ": " + t); }
+                diag("HOOK OK row icon provider " + tag);
+            } catch (Throwable t) { diag("HOOK FAIL row icon provider " + tag + ": " + t); }
         }
         try {
             Class<?> rowView = XposedHelpers.findClass(ROW_ICON_VIEW, lp.classLoader);
@@ -335,9 +342,21 @@ public final class StatusBarNotificationIcons {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
                     if (p.thisObject instanceof View view) ROW_ICONS.put(view, Boolean.TRUE);
                 }
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (!(p.thisObject instanceof ImageView view)) return;
+                    if (!listThemeEnabled()) return;
+                    try {
+                        Object provider = XposedHelpers.getObjectField(view, "mIconProvider");
+                        Drawable themed = themeDrawableOf(provider);
+                        if (themed == null || view.getDrawable() == themed) return;
+                        view.setImageDrawable(themed);
+                        XposedHelpers.callMethod(view, "adjustViewForAppIcon");
+                        diag("row icon themed " + view.getClass().getSimpleName());
+                    } catch (Throwable ignored) { }
+                }
             });
-            log("HOOK OK NotificationRowIconView#loadAppIcon");
-        } catch (Throwable t) { log("HOOK FAIL NotificationRowIconView#loadAppIcon: " + t); }
+            diag("HOOK OK NotificationRowIconView#loadAppIcon");
+        } catch (Throwable t) { diag("HOOK FAIL NotificationRowIconView#loadAppIcon: " + t); }
     }
 
     private static Drawable themeDrawableOf(Object provider) {
@@ -474,10 +493,13 @@ public final class StatusBarNotificationIcons {
         MonochromeIconGeometryHooks.refresh();
     }
 
+    /** logcat 缓冲很容易被 SystemUI 的日志淹没，诊断同时写一份进 LSPosed 模块日志。 */
     private static void diag(String msg) {
         if (diagCount >= DIAG_LIMIT) return;
         diagCount++;
-        log("[theme icon " + diagCount + "] " + msg);
+        String line = "[theme icon " + diagCount + "] " + msg;
+        log(line);
+        try { com.rikumi.colorosmod.xposed.XposedBridge.log(line); } catch (Throwable ignored) { }
     }
 
     /**

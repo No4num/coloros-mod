@@ -40,6 +40,7 @@ final class MonochromeIconGeometryHooks {
                             for (int i = 0; i < container.getChildCount(); i++) {
                                 View icon = container.getChildAt(i);
                                 if (!StatusBarNotificationIcons.isIconView(icon)) continue;
+                                if (!StatusBarNotificationIcons.inStatusBarWindow(icon)) continue;
                                 int baseline = nativeWidth(icon);
                                 if (baseline <= 0 || icon.getLayoutParams() == null) continue;
                                 boolean enlarged = MonochromeNotificationHooks.enlargedIcon(icon);
