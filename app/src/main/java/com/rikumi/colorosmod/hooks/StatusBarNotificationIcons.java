@@ -313,7 +313,7 @@ public final class StatusBarNotificationIcons {
             try {
                 Class<?> provider = XposedHelpers.findClass(name, lp.classLoader);
                 XposedBridge.hookAllMethods(provider, "shouldShowAppIcon", new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    @Override protected void afterHookedMethod(MethodHookParam p) {
                         if (!listThemeEnabled()) return;
                         if (themeDrawableOf(p.thisObject) == null) return;
                         p.setResult(Boolean.TRUE);
