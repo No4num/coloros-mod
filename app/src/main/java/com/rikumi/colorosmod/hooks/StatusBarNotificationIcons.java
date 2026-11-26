@@ -96,8 +96,15 @@ public final class StatusBarNotificationIcons {
     private static volatile Boolean themeCached;
     /** 通知中心列表主题图标开关的缓存值。 */
     private static volatile Boolean listThemeCached;
-    private static int diagCount;
-    private static final int DIAG_LIMIT = 40;
+    private static final java.util.concurrent.atomic.AtomicInteger DIAG_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static final int DIAG_LIMIT = 250;
+    private static final java.util.concurrent.atomic.AtomicInteger SCALE_DIAG =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static final int SCALE_DIAG_LIMIT = 30;
+    private static final java.util.concurrent.atomic.AtomicInteger ROW_DIAG =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static final int ROW_DIAG_LIMIT = 20;
 
     public static void hook(XC_LoadPackage.LoadPackageParam lp) {
         hookContainer(lp);
@@ -131,12 +138,44 @@ public final class StatusBarNotificationIcons {
         try {
             View root = view.getRootView();
             if (root == view) return false;
+            // ViewRootImpl 上挂的窗口属性就是这次 setView 的真实参数，比 DecorView 的 LayoutParams 可靠。
+            android.view.ViewParent parent = root.getParent();
+            if (parent != null) {
+                try {
+                    Object attrs = XposedHelpers.getObjectField(parent, "mWindowAttributes");
+                    if (attrs instanceof android.view.WindowManager.LayoutParams w) {
+                        return w.type == android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR;
+                    }
+                } catch (Throwable ignored) { }
+            }
             android.view.ViewGroup.LayoutParams params = root.getLayoutParams();
             if (params instanceof android.view.WindowManager.LayoutParams wlp) {
                 return wlp.type == android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR;
             }
         } catch (Throwable ignored) { }
         return false;
+    }
+
+    /** 诊断用：把一个图标视图所属窗口的关键信息摊平成一个字符串。 */
+    private static String windowDesc(View view) {
+        try {
+            View root = view.getRootView();
+            android.view.ViewParent parent = root.getParent();
+            String type = "?";
+            if (parent != null) {
+                try {
+                    Object attrs = XposedHelpers.getObjectField(parent, "mWindowAttributes");
+                    if (attrs instanceof android.view.WindowManager.LayoutParams w) {
+                        type = String.valueOf(w.type);
+                    }
+                } catch (Throwable ignored) { }
+            }
+            android.view.ViewGroup.LayoutParams lp = root.getLayoutParams();
+            return "root=" + root.getClass().getSimpleName()
+                    + " parent=" + (parent == null ? "null" : parent.getClass().getSimpleName())
+                    + " type=" + type
+                    + " lp=" + (lp == null ? "null" : lp.getClass().getSimpleName());
+        } catch (Throwable t) { return "desc-error " + t; }
     }
 
     static float iconScaleFor(View view) {
@@ -212,7 +251,10 @@ public final class StatusBarNotificationIcons {
                             if (!(p.thisObject instanceof View view)) return;
                             boolean statusBar = inStatusBarWindow(view);
                             float scale = statusBar ? iconScale() : 1f;
-                            diag("scale sb=" + statusBar + " x" + scale + " " + view.getClass().getSimpleName());
+                            if (SCALE_DIAG.getAndIncrement() < SCALE_DIAG_LIMIT) {
+                                diag("scale sb=" + statusBar + " x" + scale + " "
+                                        + view.getClass().getSimpleName() + " " + windowDesc(view));
+                            }
                             if (scale == 1f) return;
                             try {
                                 float current = XposedHelpers.getFloatField(view, "mIconScale");
@@ -321,8 +363,13 @@ public final class StatusBarNotificationIcons {
                 Class<?> provider = XposedHelpers.findClass(name, lp.classLoader);
                 XposedBridge.hookAllMethods(provider, "shouldShowAppIcon", new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam p) {
-                        if (!listThemeEnabled()) return;
-                        if (themeDrawableOf(p.thisObject) == null) return;
+                        boolean on = listThemeEnabled();
+                        Drawable themed = on ? themeDrawableOf(p.thisObject) : null;
+                        if (ROW_DIAG.getAndIncrement() < ROW_DIAG_LIMIT) {
+                            diag("row shouldShow on=" + on + " themed=" + (themed != null)
+                                    + " pkg=" + providerPackage(p.thisObject));
+                        }
+                        if (!on || themed == null) return;
                         p.setResult(Boolean.TRUE);
                     }
                 });
@@ -348,7 +395,13 @@ public final class StatusBarNotificationIcons {
                     try {
                         Object provider = XposedHelpers.getObjectField(view, "mIconProvider");
                         Drawable themed = themeDrawableOf(provider);
-                        if (themed == null || view.getDrawable() == themed) return;
+                        if (themed == null) {
+                            if (ROW_DIAG.getAndIncrement() < ROW_DIAG_LIMIT) {
+                                diag("row load miss pkg=" + providerPackage(provider));
+                            }
+                            return;
+                        }
+                        if (view.getDrawable() == themed) return;
                         view.setImageDrawable(themed);
                         XposedHelpers.callMethod(view, "adjustViewForAppIcon");
                         diag("row icon themed " + view.getClass().getSimpleName());
@@ -360,11 +413,17 @@ public final class StatusBarNotificationIcons {
     }
 
     private static Drawable themeDrawableOf(Object provider) {
+        String pkg = providerPackage(provider);
+        if (pkg == null || pkg.isEmpty()) return null;
+        return ThemeIconPack.drawable(pkg);
+    }
+
+    private static String providerPackage(Object provider) {
         if (provider == null) return null;
         try {
             Object sbn = XposedHelpers.getObjectField(provider, "$sbn");
             if (sbn instanceof StatusBarNotification notification) {
-                return ThemeIconPack.drawable(notification.getPackageName());
+                return notification.getPackageName();
             }
         } catch (Throwable ignored) { }
         return null;
@@ -455,6 +514,10 @@ public final class StatusBarNotificationIcons {
     public static void refresh() {
         themeCached = null;
         listThemeCached = null;
+        diag("refresh size=" + readBool(KEY_SIZE_ENABLED, false)
+                + " percent=" + readInt(KEY_SIZE_PERCENT, 100)
+                + " theme=" + readBool(KEY_THEME_ENABLED, false)
+                + " listTheme=" + readBool(KEY_LIST_THEME_ENABLED, false));
         MAIN.post(() -> {
             if (!active) return;
             // 宽度由 MonochromeIconGeometryHooks 的容器测量入口统一按比例重算。
@@ -495,9 +558,9 @@ public final class StatusBarNotificationIcons {
 
     /** logcat 缓冲很容易被 SystemUI 的日志淹没，诊断同时写一份进 LSPosed 模块日志。 */
     private static void diag(String msg) {
-        if (diagCount >= DIAG_LIMIT) return;
-        diagCount++;
-        String line = "[theme icon " + diagCount + "] " + msg;
+        int n = DIAG_COUNT.getAndIncrement();
+        if (n >= DIAG_LIMIT) return;
+        String line = "[theme icon " + (n + 1) + "] " + msg;
         log(line);
         try { com.rikumi.colorosmod.xposed.XposedBridge.log(line); } catch (Throwable ignored) { }
     }
